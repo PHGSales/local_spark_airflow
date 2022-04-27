@@ -1,0 +1,2 @@
+apache-airflow[celery]==2.1.1
+tweepy==4.1.0

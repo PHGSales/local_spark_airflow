@@ -1,0 +1,134 @@
+version: '3'
+x-common:
+  &common
+  build:
+    context: .
+  environment:
+    &common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__API__AUTH_BACKEND: 'airflow.api.auth.backend.basic_auth'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__MIN_FILE_PROCESS_INTERVAL: 10
+    ENVIRONMENT: 'TEST'
+  volumes:
+    - ./src/resources/airflow/dags:/opt/airflow/dags:cached
+    - ./src/resources/airflow/logs:/opt/airflow/logs:cached
+    - ./src/resources/airflow/plugins:/opt/airflow/plugins:cached
+  user: root
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:13
+    networks:
+      - local
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data:cached
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    restart: always
+
+  airflow-webserver:
+    <<: *common
+    command: webserver
+    depends_on:
+      - airflow-scheduler
+    networks:
+      - local
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  airflow-scheduler:
+    <<: *common
+    command: scheduler
+    depends_on:
+      - postgres
+    networks:
+      - local
+    restart: always
+
+  airflow-init:
+    <<: *common
+    command: version
+    depends_on:
+      - airflow-webserver
+    networks:
+      - local
+    environment:
+      <<: *common-env
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+
+  spark:
+    image: bitnami/spark:2
+    user: root
+    hostname: spark
+    networks:
+      - local
+    environment:
+      - ENVIRONMENT=TEST
+      - SPARK_MODE=master
+      - SPARK_MASTER_WEBUI_PORT=8080
+      - SPARK_MASTER_URL=spark://spark:7077
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080" ]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+    volumes:
+      - ./src/resources/data_lake/bronze:/data/bronze
+      - ./src/resources/data_lake/silver:/data/silver
+      - ./src/resources/data_lake/gold:/data/gold
+
+  spark-worker-1:
+    image: bitnami/spark:2
+    user: root
+    networks:
+      - local
+    environment:
+      - ENVIRONMENT=TEST
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_WORKER_CORES=2
+    depends_on:
+      spark:
+        condition: service_healthy
+    volumes:
+      - ./src/resources/data_lake/bronze:/data/bronze
+      - ./src/resources/data_lake/silver:/data/silver
+      - ./src/resources/data_lake/gold:/data/gold
+
+
+volumes:
+  postgres-db-volume:
+
+networks:
+  local:
+    driver: bridge 
